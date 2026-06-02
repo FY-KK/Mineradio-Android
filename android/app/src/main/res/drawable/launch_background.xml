@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动背景：纯暗场，避免冷启动白屏；Compose 接管后不再显示 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/fc_bg" />
+    <item android:gravity="center">
+        <inset
+            android:drawable="@drawable/ic_launcher_foreground"
+            android:inset="30%" />
+    </item>
+</layer-list>

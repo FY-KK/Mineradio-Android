@@ -1,0 +1,1168 @@
+package com.mineradio.player.ui.screen
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.ViewCarousel
+import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import coil.ImageLoader
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Size
+import androidx.core.graphics.drawable.toBitmap
+import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
+import com.mineradio.player.data.api.dto.Podcast
+import com.mineradio.player.data.api.dto.Song
+import com.mineradio.player.render.GalaxyState
+import com.mineradio.player.render.ParticleGalaxyBackground
+import com.mineradio.player.render.Shelf3DPanel
+import com.mineradio.player.ui.MainViewModel
+import com.mineradio.player.ui.Screen
+import com.mineradio.player.ui.UiState
+import com.mineradio.player.ui.component.*
+import com.mineradio.player.ui.theme.MineradioColors
+
+/**
+ * 主外壳 —— 横屏布局：左侧歌词舞台 + 右侧上下文侧栏（搜索/首页/歌单/详情）。
+ * 底部固定播放控制条。顶部标题栏带全部入口（登录/首页/歌单架/播客/评论/DIY/沉浸/设置）。
+ *
+ * 全屏浮层：登录 / 账户 / 评论 / 播客 / 3D 歌单架 / 设置 / DIY 系列。
+ *
+ * 设计对应桌面版 index.html 的整体结构与导航流。
+ */
+@Composable
+fun PlayerShell(
+    vm: MainViewModel,
+    state: UiState,
+) {
+    val playback by vm.playback.collectAsState()
+    val galaxyState = remember { GalaxyState() }
+    var searchOpen by remember { mutableStateOf(false) }
+    var searchText by remember { mutableStateOf("") }
+
+    // 粒子背景配色：custom 模式用 FxState 自定义色，否则用默认 wallpaper 配色
+    val galaxyColors = state.fx.overlayColors()
+
+    // 封面裁剪 / 封面取色：打开任一弹层时异步加载当前曲目封面为 Bitmap
+    val context = LocalContext.current
+    var coverBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(state.showCoverCrop || state.showCoverColor, playback.current?.displayCover) {
+        if (state.showCoverCrop || state.showCoverColor) {
+            val url = playback.current?.displayCover.orEmpty()
+            coverBitmap = if (url.isEmpty()) null else runCatching {
+                val loader = ImageLoader(context)
+                val req = ImageRequest.Builder(context).data(url).size(Size.ORIGINAL).build()
+                loader.execute(req).drawable?.let { d ->
+                    if (d is android.graphics.drawable.BitmapDrawable) d.bitmap
+                    else d.toBitmap()
+                }
+            }.getOrNull()
+        } else {
+            // 模态关闭时回收大图 Bitmap，避免 ORIGINAL 尺寸封面占用内存
+            coverBitmap?.recycle()
+            coverBitmap = null
+        }
+    }
+
+    // 首次进入自动弹出视觉引导（对应桌面版 onboarding 检查 localStorage.visualGuideSeen）
+    LaunchedEffect(Unit) {
+        if (!state.visualGuideSeen && !state.showVisualGuide) {
+            vm.toggleVisualGuide()
+        }
+    }
+
+    // 文件导入 launcher（对应桌面版 #file-input + handleFileImport）
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isNotEmpty()) vm.importFiles(uris.map { it.toString() })
+    }
+
+    // FX 存档导出 launcher（对应桌面版 exportUserFxArchive：写 JSON 文件）
+    // 先把待导出的 JSON 存到这个 state，launcher 回调时取出写入
+    var fxExportPayload by remember { mutableStateOf("") }
+    val fxExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null && fxExportPayload.isNotEmpty()) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(fxExportPayload.toByteArray(Charsets.UTF_8))
+                }
+            }
+            fxExportPayload = ""
+        }
+    }
+
+    // FX 存档导入 launcher（对应桌面版 importUserFxArchiveFromDialog）
+    val fxImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { inp ->
+                    val json = inp.bufferedReader(Charsets.UTF_8).readText()
+                    vm.importFxArchiveJson(json)
+                }
+            }
+        }
+    }
+
+    // 自定义背景图片 launcher（对应桌面版 background-image-input + readBackgroundImageFile）
+    val customBgImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) vm.setCustomBgUri("image", uri.toString())
+    }
+
+    // 自定义背景视频 launcher（对应桌面版 readBackgroundVideoFile）
+    val customBgVideoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) vm.setCustomBgUri("video", uri.toString())
+    }
+
+    // 播放模式标签（对应桌面版 #play-mode-chip）
+    val playModeLabel = when {
+        playback.shuffle -> "随机播放"
+        playback.repeatMode == androidx.media3.common.Player.REPEAT_MODE_ONE -> "单曲循环"
+        playback.repeatMode == androidx.media3.common.Player.REPEAT_MODE_ALL -> "列表循环"
+        else -> "顺序播放"
+    }
+
+    Box(Modifier.fillMaxSize().background(MineradioColors.FcBg)) {
+        // 0. 自定义背景层（对应桌面版 #custom-bg：纯色 / 图片 / 视频）
+        // 当 customBgType != "none" 时铺底，粒子星河在其上叠加（带透明度）
+        val bgType = state.fx.customBgType
+        if (bgType == "color") {
+            Box(Modifier.fillMaxSize().background(state.fx.customBgColor))
+        } else if (bgType == "image" && state.fx.customBgUri.isNotEmpty()) {
+            AsyncImage(
+                model = state.fx.customBgUri,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        } else if (bgType == "video" && state.fx.customBgUri.isNotEmpty()) {
+            val videoUri = state.fx.customBgUri
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    android.widget.VideoView(ctx).apply {
+                        setVideoURI(android.net.Uri.parse(videoUri))
+                        setOnPreparedListener { mp -> mp.isLooping = true; mp.setVolume(0f, 0f); mp.start() }
+                    }
+                },
+                update = { vv ->
+                    // URI 变化时重新装载（tag 标记当前已装载的 URI）
+                    if (vv.tag != videoUri) {
+                        vv.setVideoURI(android.net.Uri.parse(videoUri))
+                        vv.tag = videoUri
+                    } else if (!vv.isPlaying) {
+                        vv.start()
+                    }
+                },
+                onRelease = { vv -> vv.stopPlayback() },
+            )
+        }
+        // 1. 粒子星河背景（customBg 激活时降低不透明度，让自定义背景透出）
+        val galaxyOpacity = if (bgType != "none") state.fx.wallpaperOpacity.coerceIn(0.35f, 1f) else 1f
+        ParticleGalaxyBackground(
+            state = galaxyState,
+            playing = playback.isPlaying,
+            coverUrl = playback.current?.displayCover,
+            opacity = galaxyOpacity,
+            preset = state.fx.preset,
+            title = playback.current?.name ?: "Mineradio",
+            artist = playback.current?.displayArtist ?: "",
+            primaryColor = galaxyColors.primary,
+            secondaryColor = galaxyColors.secondary,
+            highlightColor = galaxyColors.highlight,
+            glowColor = galaxyColors.glow,
+            particleSize = state.fx.particleSize,
+            particleSpeed = state.fx.particleSpeed,
+            particleTwist = state.fx.particleTwist,
+            particleColor = state.fx.particleColor,
+            particleBloom = state.fx.particleBloom,
+            particleScatter = state.fx.particleScatter,
+            particleBgFade = state.fx.particleBgFade,
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        // 2. 主内容区（横屏左右分栏）—— 沉浸模式下隐藏侧栏，歌词舞台占满
+        Row(Modifier.fillMaxSize()) {
+            // 左：歌词舞台
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+                if (state.showLyricsPanel) {
+                    LyricStage(
+                        lines = state.lyricsLines,
+                        positionMs = playback.positionMs,
+                        fx = state.fx,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                // 当前曲目信息（左下）—— 点击标题/艺人打开详情弹窗（对应桌面版 openTrackDetailModal）
+                if (playback.current != null) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 24.dp, bottom = 110.dp)
+                    ) {
+                        Text(
+                            playback.current!!.name,
+                            color = MineradioColors.FcInk,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { vm.openTrackDetail("song") },
+                        )
+                        Text(
+                            playback.current!!.displayArtist,
+                            color = MineradioColors.FcMuted,
+                            fontSize = 14.sp,
+                            modifier = Modifier.clickable { vm.openTrackDetail("artist") },
+                        )
+                    }
+                }
+            }
+
+            // 右：侧栏（上下文路由）—— 沉浸模式下隐藏
+            AnimatedVisibility(visible = !state.immersiveMode, enter = fadeIn(), exit = fadeOut()) {
+                SideRouter(
+                    vm = vm,
+                    state = state,
+                    searchOpen = searchOpen,
+                    searchText = searchText,
+                    onSearchToggle = { searchOpen = !searchOpen; if (!searchOpen) searchText = "" },
+                    onSearchChange = { searchText = it; vm.search(it) },
+                    onSongClick = { song ->
+                        val queue = when {
+                            searchText.isNotEmpty() -> state.searchResults
+                            state.screen == Screen.PLAYLIST_DETAIL -> state.currentPlaylistTracks
+                            else -> state.discover?.dailyRecommend.orEmpty()
+                        }
+                        vm.playSong(song, queue)
+                    },
+                    modifier = Modifier
+                        .width(440.dp)
+                        .fillMaxHeight()
+                        .padding(16.dp),
+                )
+            }
+        }
+
+        // 3. 顶部标题栏 —— 沉浸模式下隐藏
+        AnimatedVisibility(
+            visible = !state.immersiveMode,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            TopBar(
+                vm = vm,
+                state = state,
+                onSearchClick = { searchOpen = true },
+                onImportClick = {
+                    filePicker.launch("*/*")
+                },
+            )
+        }
+
+        // 4. 底部控制条
+        BottomControlBar(
+            state = playback,
+            liked = playback.current?.let { vm.isLiked(it) } ?: false,
+            quality = state.playbackQuality,
+            showLyricsPanel = state.showLyricsPanel,
+            controlsAutoHide = state.controlsAutoHide,
+            immersiveMode = state.immersiveMode,
+            onPlayPause = vm::playPause,
+            onSkipPrev = vm::skipPrev,
+            onSkipNext = vm::skipNext,
+            onSeek = vm::seekTo,
+            onToggleLike = { playback.current?.let { vm.toggleLike(it) } },
+            onCollect = vm::openCollectModalForCurrent,
+            onCyclePlayMode = vm::cyclePlayMode,
+            onToggleMiniQueue = vm::toggleMiniQueue,
+            onToggleLyricsPanel = vm::toggleLyricsPanel,
+            onToggleControlsAutoHide = vm::toggleControlsAutoHide,
+            onToggleImmersive = vm::toggleImmersive,
+            onQualityChange = vm::setQuality,
+            onSongClick = { song, queue -> vm.playSong(song, queue) },
+            queue = playback.queue,
+            showMiniQueue = state.showMiniQueue,
+            collectPlaylists = state.collectPlaylists,
+            showCollect = state.showCollect,
+            onCollectToPlaylist = vm::collectCurrentToPlaylist,
+            onCreatePlaylist = vm::createPlaylist,
+            onDismissCollect = vm::toggleCollect,
+            volume = playback.volume,
+            muted = playback.muted,
+            onVolumeChange = vm::setVolume,
+            onToggleMute = vm::toggleMute,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp),
+        )
+
+        // 5. 搜索框浮层（顶部）
+        AnimatedVisibility(
+            visible = searchOpen,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 72.dp, start = 24.dp, end = 24.dp),
+        ) {
+            SearchBar(
+                value = searchText,
+                onValueChange = { searchText = it; vm.search(it) },
+                onSubmit = { vm.commitSearch(searchText) },
+                modifier = Modifier.fillMaxWidth(),
+                searchMode = state.searchMode,
+                onModeChange = vm::setSearchMode,
+                history = state.searchHistory,
+                onHistoryClick = { q -> searchText = q; vm.runSearchHistory(q) },
+                onClearHistory = vm::clearSearchHistory,
+            )
+        }
+
+        // 6. 设置面板浮层
+        AnimatedVisibility(visible = state.showSettings, enter = fadeIn(), exit = fadeOut()) {
+            SettingsPanel(
+                currentBackend = state.backendUrl,
+                onSave = { vm.setBackendUrl(it); vm.toggleSettings() },
+                onDismiss = vm::toggleSettings,
+            )
+        }
+
+        // 6.5 DIY 浮层集合
+        AnimatedVisibility(visible = state.showDesktopLyricsDiy, enter = fadeIn(), exit = fadeOut()) {
+            DiyOverlayPanel(title = "桌面歌词 DIY", onClose = vm::toggleDesktopLyricsDiy) {
+                DesktopLyricsDiyPanel(
+                    enabled = state.fx.desktopLyrics,
+                    onEnabledChange = { v -> vm.updateFx { it.copy(desktopLyrics = v) } },
+                    size = state.fx.desktopLyricsSize,
+                    onSizeChange = { v -> vm.updateFx { it.copy(desktopLyricsSize = v) } },
+                    opacity = state.fx.desktopLyricsOpacity,
+                    onOpacityChange = { v -> vm.updateFx { it.copy(desktopLyricsOpacity = v) } },
+                    yPos = state.fx.desktopLyricsY,
+                    onYChange = { v -> vm.updateFx { it.copy(desktopLyricsY = v) } },
+                    locked = state.fx.desktopLyricsClickThrough,
+                    onLockedChange = { v -> vm.updateFx { it.copy(desktopLyricsClickThrough = v) } },
+                    fps = state.fx.desktopLyricsFps,
+                    onFpsChange = { v -> vm.updateFx { it.copy(desktopLyricsFps = v) } },
+                    lyricColor = state.fx.lyricColor,
+                    onLyricColorChange = { v -> vm.updateFx { it.copy(lyricColorMode = "custom", lyricColor = v) } },
+                    highlightColor = state.fx.lyricHighlightColor,
+                    onHighlightColorChange = { v -> vm.updateFx { it.copy(lyricColorMode = "custom", lyricHighlightColor = v) } },
+                    glowColor = state.fx.lyricGlowColor,
+                    onGlowColorChange = { v -> vm.updateFx { it.copy(lyricColorMode = "custom", lyricGlowColor = v) } },
+                    tintColor = state.fx.visualTintColor,
+                    onTintColorChange = { v -> vm.updateFx { it.copy(lyricColorMode = "custom", visualTintColor = v) } },
+                )
+            }
+        }
+        AnimatedVisibility(visible = state.showWallpaperDiy, enter = fadeIn(), exit = fadeOut()) {
+            DiyOverlayPanel(title = "壁纸模式 DIY", onClose = vm::toggleWallpaperDiy) {
+                WallpaperDiyPanel(
+                    enabled = state.fx.wallpaperMode,
+                    onEnabledChange = { v -> vm.updateFx { it.copy(wallpaperMode = v) } },
+                    devLocked = state.fx.wallpaperDevLocked,
+                    opacity = state.fx.wallpaperOpacity,
+                    onOpacityChange = { v -> vm.updateFx { it.copy(wallpaperOpacity = v) } },
+                    preset = state.fx.preset,
+                    onPresetChange = { v -> vm.updateFx { it.copy(preset = v) } },
+                )
+            }
+        }
+        AnimatedVisibility(visible = state.showFxArchives, enter = fadeIn(), exit = fadeOut()) {
+            DiyOverlayPanel(title = "FX 存档", onClose = vm::toggleFxArchives) {
+                FxArchiveSlots(
+                    slots = state.fxArchives,
+                    onSave = vm::saveFxArchive,
+                    onLoad = vm::loadFxArchive,
+                    onExport = { idx ->
+                        val json = vm.exportFxArchiveJson(idx)
+                        if (json.isNotEmpty()) {
+                            fxExportPayload = json
+                            fxExportLauncher.launch("mineradio_fx_archive_${idx + 1}.json")
+                        }
+                    },
+                    onImport = { fxImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                )
+            }
+        }
+        AnimatedVisibility(visible = state.showCoverCrop, enter = fadeIn(), exit = fadeOut()) {
+            if (coverBitmap != null) {
+                CoverCropModal(
+                    bitmap = coverBitmap,
+                    onCommit = vm::commitCoverCrop,
+                    onDismiss = vm::toggleCoverCrop,
+                    onClear = vm::clearCustomCover,
+                )
+            } else {
+                DiyOverlayPanel(title = "裁剪封面", onClose = vm::toggleCoverCrop) {
+                    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        Text("正在加载封面…", color = MineradioColors.FcMuted, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+
+        // 6.5.1 FX 视觉控制台（总面板，对应桌面版 #fx-panel）
+        AnimatedVisibility(visible = state.showFxPanel, enter = fadeIn(), exit = fadeOut()) {
+            DiyOverlayPanel(title = "视觉控制台", onClose = vm::toggleFxPanel) {
+                FxPanel(
+                    fx = state.fx,
+                    onUpdate = vm::updateFx,
+                    onOpenColorLab = { target -> vm.toggleColorLab(target) },
+                    onOpenCoverColor = { target -> vm.toggleCoverColor(target) },
+                    onPickCustomBgImage = { customBgImageLauncher.launch("image/*") },
+                    onPickCustomBgVideo = { customBgVideoLauncher.launch("video/*") },
+                )
+            }
+        }
+        // 6.5.2 自定义歌词 LRC 编辑器（#custom-lyric-modal）
+        AnimatedVisibility(visible = state.showCustomLyric, enter = fadeIn(), exit = fadeOut()) {
+            CustomLyricModal(
+                text = state.customLyricText,
+                onTextChange = vm::setCustomLyricText,
+                onSave = vm::saveCustomLyric,
+                onDelete = vm::deleteCustomLyric,
+                onDismiss = vm::toggleCustomLyric,
+                lyricSource = state.lyricSource,
+                onLyricSourceChange = vm::setLyricSource,
+            )
+        }
+        // 6.5.3 色彩实验室（#color-lab-pop）—— 初始色由 target 字段决定
+        AnimatedVisibility(visible = state.showColorLab, enter = fadeIn(), exit = fadeOut()) {
+            val initialColor = when (state.colorLabTarget) {
+                "lyric" -> state.fx.lyricColor
+                "highlight" -> state.fx.lyricHighlightColor
+                "glow" -> state.fx.lyricGlowColor
+                "tint" -> state.fx.visualTintColor
+                "shelfAccent" -> state.fx.shelfAccent
+                "bgColor" -> state.fx.customBgColor
+                else -> state.fx.lyricColor
+            }
+            ColorLabPop(
+                initialColor = initialColor,
+                target = state.colorLabTarget,
+                onPick = vm::applyColorLab,
+                onDismiss = { vm.toggleColorLab(state.colorLabTarget) },
+            )
+        }
+        // 6.5.3b 封面取色（.cover-color-pop）—— 从封面 Bitmap 取色 + 自动主色板
+        AnimatedVisibility(visible = state.showCoverColor, enter = fadeIn(), exit = fadeOut()) {
+            CoverColorPop(
+                bitmap = coverBitmap,
+                target = state.coverColorTarget,
+                onPick = vm::applyCoverColor,
+                onDismiss = { vm.toggleCoverColor(state.coverColorTarget) },
+            )
+        }
+        // 6.5.4 本地节奏分析（#local-beat-modal）
+        AnimatedVisibility(visible = state.showLocalBeat, enter = fadeIn(), exit = fadeOut()) {
+            LocalBeatModal(
+                onDismiss = vm::toggleLocalBeat,
+                onAnalyze = { mode, onResult -> vm.analyzeBeat(mode, onResult) },
+            )
+        }
+        // 6.5.5 更新面板（#update-modal）—— 完整结构：版本号 + 主副文案 + changelog 列表 + 下载进度按钮
+        AnimatedVisibility(visible = state.showUpdateModal, enter = fadeIn(), exit = fadeOut()) {
+            DiyOverlayPanel(title = "发现新版本", onClose = vm::toggleUpdateModal) {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    // 版本号（#update-modal-version）
+                    Text(
+                        "v${state.updateVersion}",
+                        color = MineradioColors.FcAccent,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // 主文案（#update-hero-main）
+                    if (state.updateHeroMain.isNotEmpty()) {
+                        Text(
+                            state.updateHeroMain,
+                            color = MineradioColors.FcInk,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    // 副文案（#update-hero-sub）
+                    if (state.updateHeroSub.isNotEmpty()) {
+                        Text(
+                            state.updateHeroSub,
+                            color = MineradioColors.FcMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    // 更新内容列表（#update-list）
+                    if (state.updateChangelog.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("更新内容", color = MineradioColors.FcInk2, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        state.updateChangelog.forEach { line ->
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text("•", color = MineradioColors.FcAccent, fontSize = 12.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Text(line, color = MineradioColors.FcInk2, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    // 下载按钮（#update-primary-btn + #update-btn-fill 进度）
+                    Button(
+                        onClick = { vm.startUpdateDownload() },
+                        enabled = state.updateAvailable && !state.updateDownloading && state.updateDownloadProgress < 1f,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MineradioColors.FcAccent,
+                            contentColor = MineradioColors.ChillInk,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        val label = when {
+                            state.updateDownloadProgress >= 1f -> "下载完成"
+                            state.updateDownloading -> "下载中 ${(state.updateDownloadProgress * 100).toInt()}%"
+                            state.updateAvailable -> "立即更新"
+                            else -> "已是最新"
+                        }
+                        Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        Text(
+                            "暂不更新",
+                            color = MineradioColors.FcMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.clickable { vm.toggleUpdateModal() }.padding(8.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        // 6.5.6 视觉引导（#visual-guide）—— 全屏遮罩，置顶
+        AnimatedVisibility(visible = state.showVisualGuide, enter = fadeIn(), exit = fadeOut()) {
+            VisualGuide(onDismiss = vm::dismissVisualGuide)
+        }
+
+        // 6.5.6b 听歌画像弹层（#profile-modal）—— 顶部汇总 + 最近播放列表
+        AnimatedVisibility(visible = state.showListenProfile, enter = fadeIn(), exit = fadeOut()) {
+            ListenProfileModal(
+                summary = state.listenSummary,
+                recent = state.recentListen,
+                onDismiss = vm::dismissListenProfile,
+            )
+        }
+
+        // 6.5.7 歌曲/歌手详情（#track-detail-modal）
+        AnimatedVisibility(visible = state.showTrackDetail, enter = fadeIn(), exit = fadeOut()) {
+            TrackDetailModal(
+                type = state.trackDetailType,
+                song = state.trackDetailSong,
+                artist = state.trackDetailArtist,
+                comments = state.trackDetailComments,
+                loading = state.trackDetailLoading,
+                onSongClick = { song, queue -> vm.playSong(song, queue); vm.closeTrackDetail() },
+                onDismiss = vm::closeTrackDetail,
+            )
+        }
+
+        // 7. 启动遮罩（#splash）—— 置顶，点击进入主界面
+        AnimatedVisibility(visible = state.showSplash, enter = fadeIn(), exit = fadeOut()) {
+            SplashOverlay(onEnter = vm::dismissSplash)
+        }
+
+        // 6.6 登录浮层
+        AnimatedVisibility(visible = state.showLogin, enter = fadeIn(), exit = fadeOut()) {
+            LoginPanel(
+                provider = state.loginProvider,
+                onProviderChange = { vm.setLoginProvider(it) },
+                qrImgUrl = state.qrImgUrl,
+                qrStatus = state.qrStatus,
+                qqCookieInput = state.qqCookieInput,
+                onQqCookieChange = vm::onQqCookieInput,
+                onRefreshQr = vm::refreshQr,
+                onSubmitQqCookie = vm::submitQqCookie,
+                onDismiss = vm::toggleLogin,
+            )
+        }
+        // 6.7 账户浮层
+        AnimatedVisibility(visible = state.showAccount, enter = fadeIn(), exit = fadeOut()) {
+            AccountPanel(
+                neteaseLogin = state.neteaseLogin,
+                qqLogin = state.qqLogin,
+                activeProvider = state.activeSource,
+                onSwitchProvider = vm::setSource,
+                onLogout = vm::logout,
+                onDismiss = vm::toggleAccount,
+            )
+        }
+        // 6.8 评论浮层
+        AnimatedVisibility(visible = state.showComments, enter = fadeIn(), exit = fadeOut()) {
+            CommentsPanel(
+                song = state.commentsSong,
+                comments = state.comments,
+                onDismiss = vm::dismissComments,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .width(520.dp)
+                    .height(560.dp),
+            )
+        }
+        // 6.9 播客浮层
+        AnimatedVisibility(visible = state.showPodcast, enter = fadeIn(), exit = fadeOut()) {
+            PodcastPanel(
+                hotPodcasts = state.hotPodcasts,
+                selectedPodcast = state.selectedPodcast,
+                programs = state.podcastPrograms,
+                onPodcastClick = vm::selectPodcast,
+                onProgramClick = vm::playPodcastProgram,
+                onBack = vm::backToPodcastList,
+                onDismiss = vm::dismissPodcast,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .width(720.dp)
+                    .height(560.dp),
+            )
+        }
+        // 6.10 3D 歌单架浮层（全屏）
+        AnimatedVisibility(visible = state.showShelf, enter = fadeIn(), exit = fadeOut()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MineradioColors.FcBg.copy(alpha = 0.96f))
+                    .clickable(enabled = false) {},
+            ) {
+                Shelf3DPanel(
+                    playlists = state.playlists,
+                    selectedIndex = state.shelfSelectedIndex,
+                    mode = state.shelfMode,
+                    onSelect = vm::setShelfSelected,
+                    onModeChange = vm::setShelfMode,
+                    modifier = Modifier.fillMaxSize(),
+                    shelfSize = state.fx.shelfSize,
+                    shelfX = state.fx.shelfX,
+                    shelfY = state.fx.shelfY,
+                    shelfZ = state.fx.shelfZ,
+                    shelfAngle = state.fx.shelfAngle,
+                    shelfOpacity = state.fx.shelfOpacity,
+                    shelfBgAlpha = state.fx.shelfBgAlpha,
+                    shelfAccent = state.fx.shelfAccent,
+                )
+                // 顶部操作条：打开选中歌单 / 关闭
+                Row(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = vm::openShelfSelected) {
+                        Icon(Icons.Filled.Bookmarks, "打开选中歌单", tint = MineradioColors.FcAccent)
+                    }
+                    IconButton(onClick = vm::toggleShelf) {
+                        Icon(Icons.Filled.Settings, "关闭", tint = MineradioColors.FcInk2)
+                    }
+                }
+            }
+        }
+
+        // 6.11 DIY 浮区按钮（右上角，常驻，对应 #fullscreen-diy-zone）
+        DiyFloatingZone(
+            visible = !state.immersiveMode,
+            diyMode = state.fx.diyMode,
+            onToggle = vm::toggleDiyMode,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 12.dp, end = 60.dp),
+        )
+
+        // 6.12 试听片段横幅（#trial-banner）—— 顶部居中，沉浸模式隐藏
+        if (!state.immersiveMode) {
+            TrialBanner(
+                visible = state.showTrialBanner,
+                text = state.trialText,
+                loggedIn = state.trialLoggedIn,
+                onLoginClick = vm::toggleLogin,
+                onDismiss = vm::dismissTrialBanner,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 80.dp),
+            )
+        }
+
+        // 6.13 节奏分析 + AI 深度估计角标（#beat-chip / #ai-depth-chip）—— 右上角，沉浸模式隐藏
+        if (!state.immersiveMode) {
+            Column(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 80.dp, end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AiDepthChip(text = state.aiDepthChipText)
+                BeatChip(text = state.beatChipText)
+            }
+        }
+
+        // 6.14 自由镜头提示（#free-camera-hint）—— 底部居中，控制条上方
+        FreeCameraHint(
+            visible = state.showFreeCameraHint,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 110.dp),
+        )
+
+        // 6.15 手势 HUD（#gesture-hud）—— 左下角
+        GestureHud(
+            visible = state.showGestureHud,
+            gestureLabel = state.gestureLabel,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 16.dp, bottom = 110.dp),
+        )
+
+        // 6.16 歌单/队列三 tab 面板（#playlist-panel）—— 右侧浮层，沉浸模式隐藏
+        if (!state.immersiveMode) {
+            PlaylistPanel(
+                visible = state.showPlaylistPanel,
+                tab = state.playlistPanelTab,
+                pinned = state.playlistPanelPinned,
+                queue = playback.queue,
+                currentIndex = playback.queueIndex,
+                playlists = state.playlists,
+                podcasts = state.hotPodcasts,
+                onSwitchTab = vm::switchPlaylistTab,
+                onTogglePinned = vm::togglePlaylistPanelPinned,
+                onShuffle = vm::shuffleQueue,
+                onClearQueue = vm::clearQueue,
+                onCyclePlayMode = vm::cyclePlayMode,
+                playModeLabel = playModeLabel,
+                onSongClick = { song, queue -> vm.playSong(song, queue) },
+                onJumpTo = vm::jumpToQueue,
+                onRemove = vm::removeQueueItem,
+                onPlaylistClick = { pl -> vm.togglePlaylistPanel(); vm.openPlaylistDetail(pl) },
+                onRefreshPlaylists = vm::refreshUserPlaylists,
+                onRefreshPodcasts = vm::loadPodcastHot,
+                onPodcastClick = { pod ->
+                    vm.togglePlaylistPanel()
+                    // 先打开播客浮层（会重置选中态），再设置选中播客并加载节目，避免被重置覆盖
+                    if (!state.showPodcast) vm.togglePodcast()
+                    vm.selectPodcast(pod)
+                },
+                onDismiss = vm::togglePlaylistPanel,
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
+        }
+
+        // 6.17 自动换源提示（#source-fallback-notice）—— 底部偏左，叠在手势 HUD 上方
+        SourceFallbackNotice(
+            visible = state.showSourceFallback,
+            text = state.sourceFallbackText,
+            onDismiss = vm::closeSourceFallbackNotice,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 16.dp, bottom = 210.dp),
+        )
+
+        // 7. Toast（对应桌面版 #toast，3 秒自动消失）
+        state.toast?.let { msg ->
+            // 自动消失定时器（对应桌面版 showToast 的 setTimeout 3000）
+            LaunchedEffect(msg) {
+                delay(3000)
+                vm.dismissToast()
+            }
+            Box(
+                Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MineradioColors.GlassDark.copy(alpha = 0.92f))
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+                    .clickable { vm.dismissToast() },
+            ) {
+                Text(msg, color = MineradioColors.FcInk, fontSize = 14.sp)
+            }
+        }
+
+        // 8. 全屏加载浮层（对应桌面版 #loading-overlay）—— 置顶
+        if (state.globalLoading) {
+            LoadingOverlay(modifier = Modifier.fillMaxSize())
+        }
+    }
+}
+
+@Composable
+private fun TopBar(
+    vm: MainViewModel,
+    state: UiState,
+    onSearchClick: () -> Unit,
+    onImportClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "MINERADIO",
+            color = MineradioColors.Champagne,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 2.sp,
+        )
+        Spacer(Modifier.weight(1f))
+        // 登录态指示 + 账户入口
+        val ne = state.neteaseLogin
+        val qq = state.qqLogin
+        val loggedIn = ne?.loggedIn == true || qq?.loggedIn == true
+        if (loggedIn) {
+            Text(
+                "${ne?.nickname ?: qq?.nickname ?: ""}",
+                color = MineradioColors.FcMuted,
+                fontSize = 11.sp,
+            )
+            IconButton(onClick = vm::toggleAccount) {
+                Icon(Icons.Filled.AccountCircle, "账户", tint = MineradioColors.Champagne)
+            }
+            Spacer(Modifier.width(4.dp))
+        } else {
+            IconButton(onClick = vm::toggleLogin) {
+                Icon(Icons.Filled.AccountCircle, "登录", tint = MineradioColors.FcInk2)
+            }
+        }
+        // 主导航入口
+        IconButton(onClick = { vm.navigateTo(Screen.HOME) }) {
+            Icon(Icons.Filled.Home, "首页", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::openPlaylistLibrary) {
+            Icon(Icons.Filled.Bookmarks, "我的歌单", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleShelf) {
+            Icon(Icons.Filled.ViewCarousel, "3D 歌单架", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::togglePodcast) {
+            Icon(Icons.Filled.GraphicEq, "播客", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = onSearchClick) {
+            Icon(Icons.Filled.Search, "搜索", tint = MineradioColors.FcInk2)
+        }
+        // 导入音乐/封面（#upload-btn）
+        IconButton(onClick = onImportClick) {
+            Icon(Icons.Filled.Upload, "导入音乐或封面", tint = MineradioColors.FcInk2)
+        }
+        // 歌单/队列面板（#playlist-panel）
+        IconButton(onClick = vm::togglePlaylistPanel) {
+            Icon(
+                Icons.Filled.QueueMusic,
+                "歌单/队列",
+                tint = if (state.showPlaylistPanel) MineradioColors.FcAccent else MineradioColors.FcInk2,
+            )
+        }
+        // DIY 入口：视觉控制台 / 桌面歌词 / 壁纸 / FX 存档 / 自定义歌词 / 本地节奏 / 封面裁剪 / 沉浸模式
+        IconButton(onClick = vm::toggleFxPanel) {
+            Icon(Icons.Filled.Dashboard, "视觉控制台", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleDesktopLyricsDiy) {
+            Icon(Icons.Filled.Tune, "桌面歌词 DIY", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleWallpaperDiy) {
+            Icon(Icons.Filled.Wallpaper, "壁纸 DIY", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleFxArchives) {
+            Icon(Icons.Filled.PhotoLibrary, "FX 存档", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleCustomLyric) {
+            Icon(Icons.Filled.Edit, "自定义歌词", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleLocalBeat) {
+            Icon(Icons.Filled.Speed, "本地节奏分析", tint = MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleCoverCrop) {
+            Icon(Icons.Filled.Image, "封面裁剪", tint = MineradioColors.FcInk2)
+        }
+        // 手势 HUD（#gesture-hud）—— 移动端视觉占位
+        IconButton(onClick = vm::toggleGestureHud) {
+            Icon(
+                Icons.Filled.PanTool,
+                "手势 HUD",
+                tint = if (state.showGestureHud) MineradioColors.FcAccent else MineradioColors.FcInk2,
+            )
+        }
+        // 自由镜头提示（#free-camera-hint）
+        IconButton(onClick = vm::toggleFreeCameraHint) {
+            Icon(
+                Icons.Filled.Videocam,
+                "自由镜头",
+                tint = if (state.showFreeCameraHint) MineradioColors.FcAccent else MineradioColors.FcInk2,
+            )
+        }
+        IconButton(onClick = vm::toggleImmersive) {
+            Icon(Icons.Filled.Fullscreen, "沉浸模式", tint = if (state.immersiveMode) MineradioColors.FcAccent else MineradioColors.FcInk2)
+        }
+        IconButton(onClick = vm::toggleVisualGuide) {
+            Icon(Icons.Filled.HelpOutline, "使用引导", tint = MineradioColors.FcInk2)
+        }
+        // 设置 + 更新角标（#update-entry）
+        IconButton(onClick = if (state.updateAvailable) vm::toggleUpdateModal else vm::toggleSettings) {
+            BadgedBox(badge = {
+                if (state.updateAvailable) {
+                    Badge { Text("${state.updateVersion}", fontSize = 9.sp) }
+                }
+            }) {
+                Icon(Icons.Filled.Settings, "设置", tint = MineradioColors.FcInk2)
+            }
+        }
+    }
+}
+
+/**
+ * 右侧侧栏路由 —— 根据 search / screen 状态显示不同内容：
+ *  - 有搜索词 → 搜索结果列表
+ *  - screen=HOME → 首页网格
+ *  - screen=PLAYLIST_LIBRARY → 我的歌单列表
+ *  - screen=PLAYLIST_DETAIL → 歌单详情
+ *  - 默认 → 每日推荐
+ */
+@Composable
+private fun SideRouter(
+    vm: MainViewModel,
+    state: UiState,
+    searchOpen: Boolean,
+    searchText: String,
+    onSearchToggle: () -> Unit,
+    onSearchChange: (String) -> Unit,
+    onSongClick: (Song) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    when {
+        searchText.isNotEmpty() -> SearchSidePanel(
+            vm = vm,
+            state = state,
+            searchText = searchText,
+            onSearchChange = onSearchChange,
+            onSongClick = onSongClick,
+            modifier = modifier,
+        )
+        state.screen == Screen.HOME -> Box(modifier) {
+            HomeGrid(
+                discover = state.discover,
+                weatherRadio = state.weatherRadio,
+                listenSummary = state.listenSummary,
+                onLibraryClick = vm::openPlaylistLibrary,
+                onDailyClick = vm::playDailyRecommend,
+                onPrivateRadioClick = vm::playPrivateRadio,
+                onContinueClick = vm::playRecentVoice,
+                onProfileClick = vm::toggleListenProfile,
+                onWeatherSongClick = vm::playWeatherSong,
+                onPlaylistTileClick = vm::openPlaylistDetail,
+            )
+        }
+        state.screen == Screen.PLAYLIST_LIBRARY -> PlaylistLibrary(
+            playlists = state.playlists,
+            onPlaylistClick = vm::openPlaylistDetail,
+            onBack = vm::backToPlayer,
+            modifier = modifier,
+        )
+        state.screen == Screen.PLAYLIST_DETAIL -> PlaylistDetail(
+            playlist = state.selectedPlaylist,
+            tracks = state.currentPlaylistTracks,
+            onPlayAll = vm::playAllPlaylist,
+            onSongClick = onSongClick,
+            onBack = vm::backToPlayer,
+            modifier = modifier,
+        )
+        else -> DailyRecommendSidePanel(
+            vm = vm,
+            state = state,
+            onSongClick = onSongClick,
+            onSearchToggle = onSearchToggle,
+            modifier = modifier,
+        )
+    }
+}
+
+@Composable
+private fun SearchSidePanel(
+    vm: MainViewModel,
+    state: UiState,
+    searchText: String,
+    onSearchChange: (String) -> Unit,
+    onSongClick: (Song) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    GlassPanel(modifier = modifier, cornerRadius = 28) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            val isPodcastMode = state.searchMode == "podcast"
+            Text(
+                if (isPodcastMode) "播客结果" else "搜索结果",
+                color = MineradioColors.FcInk,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (state.searchLoading) {
+                Text("搜索中…", color = MineradioColors.FcMuted, fontSize = 12.sp)
+            } else if (isPodcastMode) {
+                PodcastSearchResults(
+                    podcasts = state.podcastSearchResults,
+                    onPodcastClick = vm::selectPodcast,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                LikeableSongList(
+                    songs = state.searchResults,
+                    likedMap = state.likedSongMap,
+                    onSongClick = onSongClick,
+                    onToggleLike = vm::toggleLike,
+                    onCheckLikes = vm::checkLikes,
+                    onCollect = vm::openCollectModalForSong,
+                )
+            }
+        }
+    }
+}
+
+/** 播客搜索结果列表（点击进入播客详情）。 */
+@Composable
+private fun PodcastSearchResults(
+    podcasts: List<Podcast>,
+    onPodcastClick: (Podcast) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (podcasts.isEmpty()) {
+        Text("暂无播客结果", color = MineradioColors.FcMuted, fontSize = 12.sp)
+        return
+    }
+    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        items(podcasts) { pod ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onPodcastClick(pod) }
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MineradioColors.GlassDark),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (!pod.cover.isNullOrEmpty()) {
+                        coil.compose.AsyncImage(
+                            model = pod.cover,
+                            contentDescription = pod.name,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Icon(Icons.Filled.GraphicEq, null, tint = MineradioColors.FcMuted, modifier = Modifier.size(20.dp))
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        pod.name,
+                        color = MineradioColors.FcInk,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "${pod.dj?.nickname ?: "未知主播"}  ·  ${pod.programCount} 期",
+                        color = MineradioColors.FcMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DailyRecommendSidePanel(
+    vm: MainViewModel,
+    state: UiState,
+    onSongClick: (Song) -> Unit,
+    onSearchToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    GlassPanel(modifier = modifier, cornerRadius = 28) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            val songs = state.discover?.dailyRecommend.orEmpty()
+            Text("每日推荐", color = MineradioColors.FcInk, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            LikeableSongList(
+                songs = songs,
+                likedMap = state.likedSongMap,
+                onSongClick = onSongClick,
+                onToggleLike = { /* 默认列表的喜欢走当前播放曲 */ },
+                onCheckLikes = { /* 首页推荐不做批量喜欢检查 */ },
+                onCollect = vm::openCollectModalForSong,
+            )
+        }
+    }
+}
