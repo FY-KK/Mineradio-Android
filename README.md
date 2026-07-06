@@ -1,6 +1,6 @@
 # Mineradio Android
 
-Mineradio 音乐播放器 Android 原生版。
+Mineradio 音乐播放器 Android版。
 
 ## 下载
 
